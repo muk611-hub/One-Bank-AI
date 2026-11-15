@@ -29,6 +29,7 @@ import {
 import { ChatMessage, CustomerProfile, ActivityItem } from '../types';
 import { PROACTIVE_INSIGHTS, LENDING_OFFERS } from '../data/mockData';
 import { LoanConfiguratorWidget } from './LoanConfiguratorWidget';
+import { VoiceLanguage } from '../services/speechService';
 
 interface AIChatInterfaceProps {
   customer: CustomerProfile;
@@ -42,6 +43,8 @@ interface AIChatInterfaceProps {
   onOpenArchitecture: () => void;
   speechEnabled: boolean;
   setSpeechEnabled: (enabled: boolean) => void;
+  voiceLanguage: VoiceLanguage;
+  onChangeVoiceLanguage: (lang: VoiceLanguage) => void;
   isAiSpeaking: boolean;
   speakingMsgId: string | null;
   onSpeakMessage: (text: string, id?: string) => void;
@@ -60,6 +63,8 @@ export const AIChatInterface: React.FC<AIChatInterfaceProps> = ({
   onOpenArchitecture,
   speechEnabled,
   setSpeechEnabled,
+  voiceLanguage,
+  onChangeVoiceLanguage,
   isAiSpeaking,
   speakingMsgId,
   onSpeakMessage,
@@ -85,7 +90,7 @@ export const AIChatInterface: React.FC<AIChatInterfaceProps> = ({
         const recognition = new SpeechRecognition();
         recognition.continuous = false;
         recognition.interimResults = false;
-        recognition.lang = 'en-IN';
+        recognition.lang = voiceLanguage === 'hi' ? 'hi-IN' : 'en-IN';
 
         recognition.onresult = (event: any) => {
           const transcript = event.results[0][0].transcript;
@@ -104,7 +109,7 @@ export const AIChatInterface: React.FC<AIChatInterfaceProps> = ({
         recognitionRef.current = recognition;
       }
     }
-  }, []);
+  }, [voiceLanguage]);
 
   const toggleListening = () => {
     if (isListening) {
@@ -1523,7 +1528,11 @@ export const AIChatInterface: React.FC<AIChatInterfaceProps> = ({
                 const next = !speechEnabled;
                 setSpeechEnabled(next);
                 if (next) {
-                  onSpeakMessage('AI Voice response is active and ready.');
+                  onSpeakMessage(
+                    voiceLanguage === 'hi'
+                      ? 'नमस्ते, आवाज़ चालू है और मैं मदद के लिए तैयार हूँ।'
+                      : 'AI Voice response is active and ready.'
+                  );
                 } else {
                   onStopSpeech();
                 }
@@ -1547,6 +1556,36 @@ export const AIChatInterface: React.FC<AIChatInterfaceProps> = ({
                 </>
               )}
             </button>
+
+            {/* Language Selector (English / Hindi) */}
+            <div
+              className="inline-flex items-center rounded-full bg-slate-900 border border-slate-800 p-0.5 text-[10px] font-semibold"
+              role="group"
+              aria-label="Voice Language"
+            >
+              <button
+                type="button"
+                onClick={() => onChangeVoiceLanguage('en')}
+                className={`px-2 py-0.5 rounded-full transition-colors cursor-pointer ${
+                  voiceLanguage === 'en'
+                    ? 'bg-teal-500 text-slate-950'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                English
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeVoiceLanguage('hi')}
+                className={`px-2 py-0.5 rounded-full transition-colors cursor-pointer ${
+                  voiceLanguage === 'hi'
+                    ? 'bg-teal-500 text-slate-950'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                हिंदी (Hindi)
+              </button>
+            </div>
           </div>
 
           <span>Indicative offers only • No real financial transactions performed</span>

@@ -13,8 +13,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ customer, onLoginSucce
   const [authStep, setAuthStep] = useState<'idle' | 'biometric' | 'verified'>('idle');
 
   const handleAuthenticate = () => {
-    // Unlock browser speech synthesis audio context
+    // Unlock browser audio context and pre-warm natural Indian female welcome voice
     speechService.unlockAudio();
+    speechService.prefetch('Hi Mukesh, how can I assist you today?');
     setIsAuthenticating(true);
     setAuthStep('biometric');
     

@@ -1,9 +1,12 @@
 // Speech Synthesis & Voice Audio Engine for ONE AI Banking
 
+export type VoiceLanguage = 'en' | 'hi';
+
 export interface SpeechOptions {
   rate?: number;
   pitch?: number;
   lang?: string;
+  language?: VoiceLanguage;
   onStart?: () => void;
   onEnd?: () => void;
   onError?: (err: any) => void;
@@ -77,20 +80,74 @@ function convertNumberToIndianWords(num: number): string {
   return result.trim();
 }
 
+// Tiny silent WAV (44 bytes) for unlocking HTMLAudioElement on first user gesture
+const SILENT_WAV_DATA_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+
+function base64ToBlobUrl(base64: string, mimeType = 'audio/wav'): string {
+  const binaryStr = atob(base64);
+  const len = binaryStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: mimeType });
+  return URL.createObjectURL(blob);
+}
+
+function pcm16BytesToFloat32(bytes: Uint8Array): Float32Array {
+  const sampleCount = Math.floor(bytes.byteLength / 2);
+  const float32 = new Float32Array(sampleCount);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let i = 0; i < sampleCount; i++) {
+    float32[i] = view.getInt16(i * 2, true) / 32768;
+  }
+  return float32;
+}
+
 class SpeechService {
   private isUnlocked = false;
   private currentUtterance: SpeechSynthesisUtterance | null = null;
-  private selectedVoice: SpeechSynthesisVoice | null = null;
+  private selectedEnglishVoice: SpeechSynthesisVoice | null = null;
+  private selectedHindiVoice: SpeechSynthesisVoice | null = null;
   private isMuted = false;
+  private language: VoiceLanguage = 'en';
+
+  private audioEl: HTMLAudioElement | null = null;
+  private audioCtx: AudioContext | null = null;
+  private activeSources = new Set<AudioBufferSourceNode>();
+  private nextPlayTime = 0;
+
+  private isPlayingAudio = false;
+  private activeAbortController: AbortController | null = null;
+  private playbackToken = 0;
+  private audioCache = new Map<string, string>();
+  private pcmCache = new Map<string, Float32Array>();
+  private inFlightCache = new Map<string, Promise<string | null>>();
 
   constructor() {
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      // Pre-load voices
-      this.initVoices();
-      if (window.speechSynthesis.onvoiceschanged !== undefined) {
-        window.speechSynthesis.onvoiceschanged = () => this.initVoices();
+    if (typeof window !== 'undefined') {
+      this.audioEl = new Audio();
+      this.audioEl.preload = 'auto';
+
+      if ('speechSynthesis' in window) {
+        this.initVoices();
+        if (window.speechSynthesis.onvoiceschanged !== undefined) {
+          window.speechSynthesis.onvoiceschanged = () => this.initVoices();
+        }
       }
     }
+  }
+
+  public setLanguage(lang: VoiceLanguage) {
+    if (this.language !== lang) {
+      this.language = lang;
+      this.cancel();
+    }
+  }
+
+  public getLanguage(): VoiceLanguage {
+    return this.language;
   }
 
   private initVoices() {
@@ -98,57 +155,137 @@ class SpeechService {
     const voices = window.speechSynthesis.getVoices();
     if (!voices || voices.length === 0) return;
 
-    // 1. High priority: Indian English / Hindi Female voices (e.g. Veena, Heera, Neerja, Swara, Aditi, Google en-IN)
-    const indianFemaleVoice = voices.find((v) => {
+    const isFemaleName = (nameLower: string) =>
+      nameLower.includes('female') ||
+      nameLower.includes('veena') ||
+      nameLower.includes('heera') ||
+      nameLower.includes('neerja') ||
+      nameLower.includes('swara') ||
+      nameLower.includes('lekha') ||
+      nameLower.includes('aditi') ||
+      nameLower.includes('kavya') ||
+      nameLower.includes('sunita') ||
+      nameLower.includes('priya') ||
+      nameLower.includes('google');
+
+    const indianEnglishFemale = voices.find((v) => {
       const nameLower = v.name.toLowerCase();
       const langLower = (v.lang || '').toLowerCase();
-      const isIndian = langLower.includes('en-in') || langLower.includes('en_in') || langLower.includes('hi-in') || nameLower.includes('india');
-      const isFemale = nameLower.includes('female') || nameLower.includes('veena') || nameLower.includes('heera') || 
-                       nameLower.includes('neerja') || nameLower.includes('swara') || nameLower.includes('aditi') || 
-                       nameLower.includes('kavya') || nameLower.includes('sunita') || nameLower.includes('priya') ||
-                       nameLower.includes('google english (india)') || nameLower.includes('google');
-      return isIndian && isFemale;
+      const isIndianEng =
+        langLower.includes('en-in') || langLower.includes('en_in') || nameLower.includes('india');
+      return isIndianEng && isFemaleName(nameLower);
     });
 
-    // 2. Any Indian voice
+    const hindiFemale = voices.find((v) => {
+      const nameLower = v.name.toLowerCase();
+      const langLower = (v.lang || '').toLowerCase();
+      const isHindi = langLower.includes('hi-in') || langLower.includes('hi_in') || nameLower.includes('hindi');
+      return isHindi && isFemaleName(nameLower);
+    });
+
+    const anyHindi = voices.find((v) => {
+      const nameLower = v.name.toLowerCase();
+      const langLower = (v.lang || '').toLowerCase();
+      return langLower.includes('hi-in') || langLower.includes('hi_in') || nameLower.includes('hindi');
+    });
+
     const anyIndianVoice = voices.find((v) => {
       const nameLower = v.name.toLowerCase();
       const langLower = (v.lang || '').toLowerCase();
-      return langLower.includes('en-in') || langLower.includes('en_in') || nameLower.includes('india');
+      return (
+        langLower.includes('en-in') ||
+        langLower.includes('en_in') ||
+        nameLower.includes('india')
+      );
     });
 
-    // 3. High quality natural English Female voice
     const naturalFemaleEnglishVoice = voices.find((v) => {
       const nameLower = v.name.toLowerCase();
       const langLower = (v.lang || '').toLowerCase();
       const isEnglish = langLower.startsWith('en');
-      const isFemale = nameLower.includes('female') || nameLower.includes('samantha') || nameLower.includes('victoria') || 
-                       nameLower.includes('karen') || nameLower.includes('zira') || nameLower.includes('jenny') || 
-                       nameLower.includes('aria') || nameLower.includes('sonia') || nameLower.includes('natural') || 
-                       nameLower.includes('neural');
+      const isFemale =
+        nameLower.includes('female') ||
+        nameLower.includes('samantha') ||
+        nameLower.includes('victoria') ||
+        nameLower.includes('karen') ||
+        nameLower.includes('zira') ||
+        nameLower.includes('jenny') ||
+        nameLower.includes('aria') ||
+        nameLower.includes('sonia') ||
+        nameLower.includes('natural') ||
+        nameLower.includes('neural');
       return isEnglish && isFemale;
     });
 
-    const fallbackEnglishVoice = voices.find((v) => (v.lang || '').toLowerCase().startsWith('en'));
+    const fallbackEnglishVoice = voices.find((v) =>
+      (v.lang || '').toLowerCase().startsWith('en')
+    );
 
-    this.selectedVoice = indianFemaleVoice || anyIndianVoice || naturalFemaleEnglishVoice || fallbackEnglishVoice || voices[0];
+    this.selectedEnglishVoice =
+      indianEnglishFemale ||
+      anyIndianVoice ||
+      naturalFemaleEnglishVoice ||
+      fallbackEnglishVoice ||
+      voices[0];
+
+    this.selectedHindiVoice =
+      hindiFemale || anyHindi || this.selectedEnglishVoice;
   }
 
-  // Ensure browser allows speech after user gesture
-  public unlockAudio() {
-    if (this.isUnlocked) return;
-    this.isUnlocked = true;
-
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  private async ensureAudioContext(): Promise<AudioContext | null> {
+    if (typeof window === 'undefined') return null;
+    if (!this.audioCtx) {
+      const AudioCtx =
+        window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return null;
+      this.audioCtx = new AudioCtx();
+    }
+    if (this.audioCtx.state === 'suspended') {
       try {
-        window.speechSynthesis.resume();
-        // Speak a silent empty utterance to unlock Chrome/Safari audio context
-        const silentUtterance = new SpeechSynthesisUtterance(' ');
-        silentUtterance.volume = 0.01;
-        silentUtterance.rate = 2;
-        window.speechSynthesis.speak(silentUtterance);
-      } catch (e) {
-        console.warn('Speech unlock attempt:', e);
+        await this.audioCtx.resume();
+      } catch {
+        // ignore
+      }
+    }
+    return this.audioCtx;
+  }
+
+  // Ensure browser allows audio playback after user gesture
+  public unlockAudio() {
+    if (typeof window !== 'undefined') {
+      this.ensureAudioContext().catch(() => {});
+
+      if (this.isUnlocked) return;
+      this.isUnlocked = true;
+
+      if (this.audioEl) {
+        try {
+          this.audioEl.src = SILENT_WAV_DATA_URI;
+          this.audioEl.volume = 0.01;
+          const p = this.audioEl.play();
+          if (p && typeof p.then === 'function') {
+            p.then(() => {
+              if (this.audioEl && !this.isPlayingAudio) {
+                this.audioEl.pause();
+                this.audioEl.volume = 1.0;
+              }
+            }).catch(() => {});
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if ('speechSynthesis' in window) {
+        try {
+          window.speechSynthesis.resume();
+          const silentUtterance = new SpeechSynthesisUtterance(' ');
+          silentUtterance.volume = 0.01;
+          silentUtterance.rate = 2;
+          window.speechSynthesis.speak(silentUtterance);
+        } catch (e) {
+          console.warn('Speech unlock attempt:', e);
+        }
       }
     }
   }
@@ -159,8 +296,9 @@ class SpeechService {
 
     let text = rawText;
 
-    // Remove markdown symbols
+    // Remove markdown symbols & emojis
     text = text.replace(/[*_~`#]/g, '');
+    text = text.replace(/[\u{1F300}-\u{1FAFF}]/gu, '');
 
     // Replace shorthand currency notations e.g. 2L, 2.0 Lakh, 50k, 5k
     text = text.replace(/₹?\s*(\d+(?:\.\d+)?)\s*(?:lakhs?|lacs?|l)\b/gi, (_, n) => {
@@ -215,10 +353,7 @@ class SpeechService {
     text = text.replace(/(\d+(?:\.\d+)?)\s*%\s*p\.a\./gi, '$1 percent per annum');
     text = text.replace(/(\d+(?:\.\d+)?)\s*%/g, '$1 percent');
     text = text.replace(/\bp\.a\.\b/gi, 'per annum');
-    text = text.replace(/\bEMI\b/g, 'E M I');
     text = text.replace(/\bCIBIL\b/g, 'Cibil');
-    text = text.replace(/\bIFSC\b/g, 'I F S C');
-    text = text.replace(/\bOTP\b/g, 'O T P');
     text = text.replace(/\bTXN-[A-Z0-9-]+\b/gi, 'transaction reference');
     text = text.replace(/✓/g, 'confirmed');
     text = text.replace(/•/g, ',');
@@ -232,64 +367,405 @@ class SpeechService {
     return text;
   }
 
-  public speak(text: string, options: SpeechOptions = {}) {
-    if (this.isMuted) return;
+  private setCache(key: string, blobUrl: string) {
+    if (this.audioCache.size >= 30) {
+      const oldestKey = this.audioCache.keys().next().value;
+      if (oldestKey) {
+        const oldUrl = this.audioCache.get(oldestKey);
+        if (oldUrl) URL.revokeObjectURL(oldUrl);
+        this.audioCache.delete(oldestKey);
+      }
+    }
+    this.audioCache.set(key, blobUrl);
+  }
+
+  private async fetchGeminiTtsUrl(
+    speechText: string,
+    lang: VoiceLanguage,
+    signal?: AbortSignal
+  ): Promise<string | null> {
+    const cacheKey = `${lang}:${speechText}`;
+    const cached = this.audioCache.get(cacheKey);
+    if (cached) return cached;
+
+    const existingPromise = this.inFlightCache.get(cacheKey);
+    if (existingPromise && !signal) {
+      return existingPromise;
+    }
+
+    const requestPromise = (async () => {
+      try {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: speechText, language: lang }),
+          signal,
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data?.hasAudio && data?.audioBase64) {
+          const url = base64ToBlobUrl(data.audioBase64, data.mimeType || 'audio/wav');
+          this.setCache(cacheKey, url);
+          return url;
+        }
+        return null;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          throw err;
+        }
+        return null;
+      } finally {
+        this.inFlightCache.delete(cacheKey);
+      }
+    })();
+
+    if (!signal) {
+      this.inFlightCache.set(cacheKey, requestPromise);
+    }
+
+    return requestPromise;
+  }
+
+  private setPcmCache(key: string, samples: Float32Array) {
+    if (this.pcmCache.size >= 30) {
+      const oldestKey = this.pcmCache.keys().next().value;
+      if (oldestKey) this.pcmCache.delete(oldestKey);
+    }
+    this.pcmCache.set(key, samples);
+  }
+
+  private schedulePcmBuffer(
+    ctx: AudioContext,
+    samples: Float32Array,
+    rate: number,
+    token: number,
+    onFirstStart: () => void,
+    isStreamDoneRef: { done: boolean },
+    onAllEnded: () => void
+  ) {
+    if (samples.length === 0 || token !== this.playbackToken) return;
+
+    const audioBuffer = ctx.createBuffer(1, samples.length, 24000);
+    audioBuffer.getChannelData(0).set(samples);
+
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.playbackRate.value = rate;
+    source.connect(ctx.destination);
+
+    const startAt = Math.max(ctx.currentTime + 0.015, this.nextPlayTime);
+    this.nextPlayTime = startAt + audioBuffer.duration / rate;
+
+    this.activeSources.add(source);
+    source.onended = () => {
+      this.activeSources.delete(source);
+      if (
+        token === this.playbackToken &&
+        isStreamDoneRef.done &&
+        this.activeSources.size === 0
+      ) {
+        this.isPlayingAudio = false;
+        onAllEnded();
+      }
+    };
+
+    source.start(startAt);
+    if (!this.isPlayingAudio) {
+      this.isPlayingAudio = true;
+      onFirstStart();
+    }
+  }
+
+  // Pre-warm audio (e.g. login welcome message) so it plays instantly
+  public prefetch(rawText: string, lang?: VoiceLanguage) {
+    if (this.isMuted || typeof window === 'undefined') return;
+    const effectiveLang = lang || this.language;
+    const speechText = this.formatTextForSpeech(rawText);
+    const cacheKey = `${effectiveLang}:${speechText}`;
+    if (!speechText || this.audioCache.has(cacheKey) || this.pcmCache.has(cacheKey)) return;
+    this.fetchGeminiTtsUrl(speechText, effectiveLang).catch(() => {});
+  }
+
+  public async speak(text: string, options: SpeechOptions = {}) {
+    if (this.isMuted || typeof window === 'undefined') return;
+
+    const speechText = this.formatTextForSpeech(text);
+    if (!speechText) return;
+
+    const effectiveLang = options.language || this.language;
+    const rate = options.rate ?? 1.0;
+    const cacheKey = `${effectiveLang}:${speechText}`;
+
+    this.cancel();
+    const token = ++this.playbackToken;
+
+    // 1. Instant cached PCM playback (0ms network delay)
+    const cachedPcm = this.pcmCache.get(cacheKey);
+    if (cachedPcm) {
+      const ctx = await this.ensureAudioContext();
+      if (token !== this.playbackToken || this.isMuted) return;
+      if (ctx) {
+        this.nextPlayTime = ctx.currentTime + 0.01;
+        const doneRef = { done: true };
+        this.schedulePcmBuffer(
+          ctx,
+          cachedPcm,
+          rate,
+          token,
+          () => options.onStart?.(),
+          doneRef,
+          () => options.onEnd?.()
+        );
+        return;
+      }
+    }
+
+    // 2. Instant cached WAV playback (e.g. pre-warmed welcome greeting)
+    const cachedWavUrl = this.audioCache.get(cacheKey);
+    if (cachedWavUrl && this.audioEl) {
+      const played = await this.playWavUrl(cachedWavUrl, rate, token, options, speechText, effectiveLang);
+      if (played) return;
+    }
+
+    // 3. Progressive Streaming PCM via /api/tts/stream (low latency ~300-800ms to first word)
+    const abortController = new AbortController();
+    this.activeAbortController = abortController;
+    let skipUnary = false;
+    let fallbackSpokenText = speechText;
+
+    try {
+      const ctx = await this.ensureAudioContext();
+      if (token !== this.playbackToken || this.isMuted) return;
+
+      const res = await fetch('/api/tts/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: speechText, language: effectiveLang }),
+        signal: abortController.signal,
+      });
+
+      if (res.status === 429) {
+        skipUnary = true;
+        const errData = await res.json().catch(() => null);
+        if (errData?.spokenText) {
+          fallbackSpokenText = errData.spokenText;
+        }
+      } else if (res.ok && res.body && ctx) {
+        const reader = res.body.getReader();
+        const isStreamDoneRef = { done: false };
+        let remainderByte: number | null = null;
+        const collectedFloatChunks: Float32Array[] = [];
+        let totalSamples = 0;
+        let receivedAnyAudio = false;
+        this.nextPlayTime = ctx.currentTime + 0.02;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (token !== this.playbackToken || this.isMuted) {
+            await reader.cancel().catch(() => {});
+            return;
+          }
+
+          if (done) {
+            isStreamDoneRef.done = true;
+            break;
+          }
+
+          if (!value || value.byteLength === 0) continue;
+
+          // Combine leftover odd byte from previous chunk if needed
+          let bytes = value;
+          if (remainderByte !== null) {
+            const combined = new Uint8Array(value.byteLength + 1);
+            combined[0] = remainderByte;
+            combined.set(value, 1);
+            bytes = combined;
+            remainderByte = null;
+          }
+
+          if (bytes.byteLength % 2 !== 0) {
+            remainderByte = bytes[bytes.byteLength - 1];
+            bytes = bytes.subarray(0, bytes.byteLength - 1);
+          }
+
+          if (bytes.byteLength >= 2) {
+            const float32 = pcm16BytesToFloat32(bytes);
+            collectedFloatChunks.push(float32);
+            totalSamples += float32.length;
+            receivedAnyAudio = true;
+
+            this.schedulePcmBuffer(
+              ctx,
+              float32,
+              rate,
+              token,
+              () => options.onStart?.(),
+              isStreamDoneRef,
+              () => options.onEnd?.()
+            );
+          }
+        }
+
+        if (receivedAnyAudio && token === this.playbackToken) {
+          // Save combined Float32 PCM to cache for instant replays
+          const fullSamples = new Float32Array(totalSamples);
+          let offset = 0;
+          for (const chunk of collectedFloatChunks) {
+            fullSamples.set(chunk, offset);
+            offset += chunk.length;
+          }
+          this.setPcmCache(cacheKey, fullSamples);
+
+          // Edge case: all scheduled sources finished before reader.read() returned done=true
+          if (this.activeSources.size === 0 && this.isPlayingAudio) {
+            this.isPlayingAudio = false;
+            options.onEnd?.();
+          }
+          return;
+        }
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || token !== this.playbackToken) {
+        return;
+      }
+      console.warn('Streaming TTS failed, trying fallback:', err);
+    } finally {
+      if (this.activeAbortController === abortController) {
+        this.activeAbortController = null;
+      }
+    }
+
+    // 4. Unary /api/tts fallback (only if streaming failed without 429)
+    if (!skipUnary && token === this.playbackToken && !this.isMuted) {
+      try {
+        const unaryController = new AbortController();
+        this.activeAbortController = unaryController;
+        const wavUrl = await this.fetchGeminiTtsUrl(
+          speechText,
+          effectiveLang,
+          unaryController.signal
+        );
+        if (token !== this.playbackToken || this.isMuted) return;
+        if (wavUrl) {
+          const played = await this.playWavUrl(wavUrl, rate, token, options, speechText, effectiveLang);
+          if (played) return;
+        }
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || token !== this.playbackToken) return;
+      } finally {
+        this.activeAbortController = null;
+      }
+    }
+
+    // 5. Instant Browser Web Speech fallback (uses translated Hindi text if available)
+    if (token === this.playbackToken && !this.isMuted) {
+      this.speakWithBrowserFallback(fallbackSpokenText, options, effectiveLang, token);
+    }
+  }
+
+  private async playWavUrl(
+    audioUrl: string,
+    rate: number,
+    token: number,
+    options: SpeechOptions,
+    speechText: string,
+    effectiveLang: VoiceLanguage
+  ): Promise<boolean> {
+    if (!this.audioEl) return false;
+    const audio = this.audioEl;
+    audio.pause();
+    audio.currentTime = 0;
+    audio.src = audioUrl;
+    audio.volume = 1.0;
+    audio.playbackRate = rate;
+
+    audio.onplay = () => {
+      if (token !== this.playbackToken) return;
+      this.isPlayingAudio = true;
+      options.onStart?.();
+    };
+
+    audio.onended = () => {
+      if (token !== this.playbackToken) return;
+      this.isPlayingAudio = false;
+      options.onEnd?.();
+    };
+
+    audio.onerror = () => {
+      if (token !== this.playbackToken) return;
+      this.isPlayingAudio = false;
+      this.speakWithBrowserFallback(speechText, options, effectiveLang, token);
+    };
+
+    try {
+      await audio.play();
+      return true;
+    } catch {
+      this.isPlayingAudio = false;
+      return false;
+    }
+  }
+
+  private speakWithBrowserFallback(
+    speechText: string,
+    options: SpeechOptions,
+    lang: VoiceLanguage,
+    token: number
+  ) {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      console.warn('SpeechSynthesis is not supported on this browser.');
+      if (options.onError) options.onError(new Error('SpeechSynthesis unsupported'));
       return;
     }
 
     try {
-      this.cancel(); // Stop ongoing speech
-
-      const speechText = this.formatTextForSpeech(text);
-      if (!speechText) return;
-
-      // Chrome speech freeze workaround
+      window.speechSynthesis.cancel();
       window.speechSynthesis.resume();
 
       const utterance = new SpeechSynthesisUtterance(speechText);
-      // Standard 1X natural voice rate (1.0)
       utterance.rate = options.rate ?? 1.0;
       utterance.pitch = options.pitch ?? 1.05;
       utterance.volume = 1.0;
 
-      if (!this.selectedVoice) {
+      if (!this.selectedEnglishVoice && !this.selectedHindiVoice) {
         this.initVoices();
       }
-      if (this.selectedVoice) {
-        utterance.voice = this.selectedVoice;
-        utterance.lang = this.selectedVoice.lang;
+
+      const fallbackVoice =
+        lang === 'hi' ? this.selectedHindiVoice : this.selectedEnglishVoice;
+      if (fallbackVoice) {
+        utterance.voice = fallbackVoice;
+        utterance.lang = fallbackVoice.lang;
       } else {
-        utterance.lang = options.lang || 'en-IN';
+        utterance.lang = options.lang || (lang === 'hi' ? 'hi-IN' : 'en-IN');
       }
 
       utterance.onstart = () => {
+        if (token !== this.playbackToken) return;
         if (options.onStart) options.onStart();
       };
 
       utterance.onend = () => {
         this.currentUtterance = null;
+        if (token !== this.playbackToken) return;
         if (options.onEnd) options.onEnd();
       };
 
       utterance.onerror = (e) => {
         this.currentUtterance = null;
+        if (token !== this.playbackToken) return;
         if (options.onError) options.onError(e);
       };
 
       this.currentUtterance = utterance;
       window.speechSynthesis.speak(utterance);
 
-      // Web Speech timeout keeper for longer sentences (prevents Chrome cutting off after 15s)
       const resumeInterval = setInterval(() => {
-        if (!window.speechSynthesis.speaking) {
+        if (!window.speechSynthesis.speaking || token !== this.playbackToken) {
           clearInterval(resumeInterval);
         } else {
           window.speechSynthesis.resume();
         }
       }, 5000);
-
     } catch (e) {
       console.warn('Speech synthesis error:', e);
       if (options.onError) options.onError(e);
@@ -297,10 +773,44 @@ class SpeechService {
   }
 
   public cancel() {
+    this.playbackToken++;
+
+    if (this.activeAbortController) {
+      this.activeAbortController.abort();
+      this.activeAbortController = null;
+    }
+
+    if (this.activeSources.size > 0) {
+      for (const src of this.activeSources) {
+        try {
+          src.onended = null;
+          src.stop();
+          src.disconnect();
+        } catch {
+          // ignore
+        }
+      }
+      this.activeSources.clear();
+    }
+    this.nextPlayTime = 0;
+
+    if (this.audioEl) {
+      try {
+        this.audioEl.onplay = null;
+        this.audioEl.onended = null;
+        this.audioEl.onerror = null;
+        this.audioEl.pause();
+        this.audioEl.currentTime = 0;
+      } catch {
+        // ignore
+      }
+    }
+    this.isPlayingAudio = false;
+
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
-      } catch (e) {
+      } catch {
         // ignore
       }
     }
@@ -308,18 +818,35 @@ class SpeechService {
   }
 
   public pause() {
+    if (this.audioCtx && this.activeSources.size > 0 && this.audioCtx.state === 'running') {
+      this.audioCtx.suspend().catch(() => {});
+      return;
+    }
+    if (this.isPlayingAudio && this.audioEl) {
+      this.audioEl.pause();
+      return;
+    }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.pause();
     }
   }
 
   public resume() {
+    if (this.audioCtx && this.activeSources.size > 0 && this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {});
+      return;
+    }
+    if (this.audioEl && this.audioEl.src && this.audioEl.paused && !this.audioEl.ended) {
+      this.audioEl.play().catch(() => {});
+      return;
+    }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.resume();
     }
   }
 
   public isSpeaking(): boolean {
+    if (this.isPlayingAudio) return true;
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return false;
     return window.speechSynthesis.speaking;
   }

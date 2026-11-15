@@ -9,7 +9,7 @@ import {
   INITIAL_ACTIVITIES 
 } from './data/mockData';
 import { processUserMessage } from './services/intentEngine';
-import { speechService } from './services/speechService';
+import { speechService, VoiceLanguage } from './services/speechService';
 import { LoginScreen } from './components/LoginScreen';
 import { Header } from './components/Header';
 import { AIChatInterface } from './components/AIChatInterface';
@@ -68,6 +68,10 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   // Default speech synthesis to enabled so AI always speaks
   const [speechEnabled, setSpeechEnabled] = useState<boolean>(true);
+  const [voiceLanguage, setVoiceLanguage] = useState<VoiceLanguage>(() => {
+    const saved = localStorage.getItem('one_ai_voice_language');
+    return saved === 'hi' ? 'hi' : 'en';
+  });
   const [isAiSpeaking, setIsAiSpeaking] = useState<boolean>(false);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
   const [speakingSnippet, setSpeakingSnippet] = useState<string>('');
@@ -87,22 +91,30 @@ export default function App() {
     localStorage.setItem('one_ai_activities', JSON.stringify(activities));
   }, [activities]);
 
-  // Sync muted state to speech service
+  // Sync muted state & voice language to speech service
   useEffect(() => {
     speechService.setMuted(!speechEnabled);
   }, [speechEnabled]);
 
+  useEffect(() => {
+    speechService.setLanguage(voiceLanguage);
+    localStorage.setItem('one_ai_voice_language', voiceLanguage);
+  }, [voiceLanguage]);
+
   // Speech synthesis for AI replies
-  const speakText = useCallback((text: string, msgId?: string) => {
+  const speakText = useCallback((text: string, msgId?: string, overrideLanguage?: VoiceLanguage) => {
     if (!speechEnabled) return;
     try {
       speechService.unlockAudio();
+      const targetLang = overrideLanguage || voiceLanguage;
+      setIsAiSpeaking(false);
       setSpeakingMsgId(msgId || null);
       setSpeakingSnippet(text.slice(0, 75) + (text.length > 75 ? '...' : ''));
 
       speechService.speak(text, {
         rate: 1.0,
         pitch: 1.05,
+        language: targetLang,
         onStart: () => {
           setIsAiSpeaking(true);
         },
@@ -120,13 +132,30 @@ export default function App() {
       setIsAiSpeaking(false);
       setSpeakingMsgId(null);
     }
-  }, [speechEnabled]);
+  }, [speechEnabled, voiceLanguage]);
 
   const stopSpeech = useCallback(() => {
     speechService.cancel();
     setIsAiSpeaking(false);
     setSpeakingMsgId(null);
   }, []);
+
+  const handleChangeVoiceLanguage = useCallback((lang: VoiceLanguage) => {
+    if (lang === voiceLanguage) return;
+    speechService.unlockAudio();
+    speechService.setLanguage(lang);
+    setVoiceLanguage(lang);
+    setIsAiSpeaking(false);
+    setSpeakingMsgId(null);
+
+    if (speechEnabled) {
+      const sampleMsg =
+        lang === 'hi'
+          ? 'नमस्ते मुकेश, अब मैं आपसे हिंदी में बात करूँगी। बताइए आज मैं आपकी क्या मदद कर सकती हूँ?'
+          : 'Hi Mukesh, I have switched to English voice. How can I assist you today?';
+      speakText(sampleMsg, undefined, lang);
+    }
+  }, [voiceLanguage, speechEnabled, speakText]);
 
   // Handle successful login
   const handleLoginSuccess = () => {
@@ -237,6 +266,8 @@ export default function App() {
         onResetDemo={handleResetDemo}
         speechEnabled={speechEnabled}
         setSpeechEnabled={setSpeechEnabled}
+        voiceLanguage={voiceLanguage}
+        onChangeVoiceLanguage={handleChangeVoiceLanguage}
       />
 
       {/* Main Content Area */}
@@ -254,6 +285,8 @@ export default function App() {
             onOpenArchitecture={() => setIsArchitectureOpen(true)}
             speechEnabled={speechEnabled}
             setSpeechEnabled={setSpeechEnabled}
+            voiceLanguage={voiceLanguage}
+            onChangeVoiceLanguage={handleChangeVoiceLanguage}
             isAiSpeaking={isAiSpeaking}
             speakingMsgId={speakingMsgId}
             onSpeakMessage={(text, id) => speakText(text, id)}

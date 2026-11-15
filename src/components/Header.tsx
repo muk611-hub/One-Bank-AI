@@ -13,6 +13,7 @@ import {
   Cpu
 } from 'lucide-react';
 import { CustomerProfile } from '../types';
+import { VoiceLanguage } from '../services/speechService';
 
 interface HeaderProps {
   customer: CustomerProfile;
@@ -23,6 +24,8 @@ interface HeaderProps {
   onResetDemo: () => void;
   speechEnabled: boolean;
   setSpeechEnabled: (val: boolean) => void;
+  voiceLanguage: VoiceLanguage;
+  onChangeVoiceLanguage: (lang: VoiceLanguage) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -34,6 +37,8 @@ export const Header: React.FC<HeaderProps> = ({
   onResetDemo,
   speechEnabled,
   setSpeechEnabled,
+  voiceLanguage,
+  onChangeVoiceLanguage,
 }) => {
   const primaryAccount = customer.accounts.find((a) => a.isPrimary) || customer.accounts[0];
 
@@ -68,6 +73,33 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* Mobile Actions */}
             <div className="flex items-center gap-1.5 md:hidden">
+              <div
+                className="inline-flex items-center rounded-lg bg-slate-900 border border-slate-800 p-0.5 text-[10px] font-semibold"
+                title="Voice Language"
+              >
+                <button
+                  type="button"
+                  onClick={() => onChangeVoiceLanguage('en')}
+                  className={`px-1.5 py-1 rounded-md cursor-pointer transition-colors ${
+                    voiceLanguage === 'en'
+                      ? 'bg-teal-500 text-slate-950'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  EN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeVoiceLanguage('hi')}
+                  className={`px-1.5 py-1 rounded-md cursor-pointer transition-colors ${
+                    voiceLanguage === 'hi'
+                      ? 'bg-teal-500 text-slate-950'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  हिं
+                </button>
+              </div>
               <button
                 id="btn-mobile-guided-tour"
                 onClick={onOpenGuidedTour}
@@ -109,20 +141,55 @@ export const Header: React.FC<HeaderProps> = ({
               <span>How this Works</span>
             </button>
 
-            {/* Voice Audio Toggle */}
-            <button
-              id="btn-header-toggle-audio"
-              onClick={() => setSpeechEnabled(!speechEnabled)}
-              className={`px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer ${
-                speechEnabled 
-                  ? 'bg-teal-950/40 border-teal-500/40 text-teal-300' 
-                  : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300'
-              }`}
-              title={speechEnabled ? 'AI Voice readout enabled' : 'AI Voice readout muted'}
-            >
-              {speechEnabled ? <Volume2 className="w-3.5 h-3.5 text-teal-400" /> : <VolumeX className="w-3.5 h-3.5" />}
-              <span className="text-[11px]">{speechEnabled ? 'Voice On' : 'Voice Off'}</span>
-            </button>
+            {/* Voice Audio Toggle + English / Hindi Language Selector */}
+            <div className="flex items-center gap-1.5">
+              <button
+                id="btn-header-toggle-audio"
+                onClick={() => setSpeechEnabled(!speechEnabled)}
+                className={`px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  speechEnabled 
+                    ? 'bg-teal-950/40 border-teal-500/40 text-teal-300' 
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300'
+                }`}
+                title={speechEnabled ? 'AI Voice readout enabled' : 'AI Voice readout muted'}
+              >
+                {speechEnabled ? <Volume2 className="w-3.5 h-3.5 text-teal-400" /> : <VolumeX className="w-3.5 h-3.5" />}
+                <span className="text-[11px]">{speechEnabled ? 'Voice On' : 'Voice Off'}</span>
+              </button>
+
+              <div
+                className="inline-flex items-center rounded-xl bg-slate-900 border border-slate-800 p-0.5 text-[11px] font-semibold"
+                role="group"
+                aria-label="Voice Language"
+              >
+                <button
+                  id="btn-header-voice-en"
+                  type="button"
+                  onClick={() => onChangeVoiceLanguage('en')}
+                  className={`px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                    voiceLanguage === 'en'
+                      ? 'bg-teal-500 text-slate-950 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Indian English Female Voice"
+                >
+                  EN
+                </button>
+                <button
+                  id="btn-header-voice-hi"
+                  type="button"
+                  onClick={() => onChangeVoiceLanguage('hi')}
+                  className={`px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                    voiceLanguage === 'hi'
+                      ? 'bg-teal-500 text-slate-950 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Hindi Female Voice"
+                >
+                  हिंदी
+                </button>
+              </div>
+            </div>
 
             {/* Reset Demo */}
             <button
