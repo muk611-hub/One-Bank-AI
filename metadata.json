@@ -1,0 +1,6 @@
+{
+  "name": "ONE — AI Banking",
+  "description": "AI-Native Digital Banking prototype where customers interact through one conversational AI interface for lending, payments, balance transfers, and asset finance.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
